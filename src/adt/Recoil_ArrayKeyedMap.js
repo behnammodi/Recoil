@@ -13,23 +13,18 @@
  * @flow
  * @format
  */
-
 'use strict';
 
-// eslint-disable-next-line fb-www/no-symbol
-const LEAF = Symbol('ArrayKeyedMap');
+const LEAF = {};
 
 const emptyMap = new Map();
 
 class ArrayKeyedMap<V> {
-  // @fb-only: _base: Map<any, any> = new Map();
+  _base: Map<any, any> = new Map();
 
   constructor(
     existing?: ArrayKeyedMap<V> | Iterable<[mixed, V]>,
   ): ArrayKeyedMap<V> {
-    // $FlowOSSFixMe
-    this._base = new Map(); // @oss-only
-
     if (existing instanceof ArrayKeyedMap) {
       for (const [k, v] of existing.entries()) {
         this.set(k, v);
@@ -44,7 +39,6 @@ class ArrayKeyedMap<V> {
 
   get(key: mixed): V | void {
     const ks = Array.isArray(key) ? key : [key];
-    // $FlowOSSFixMe
     let map = this._base;
     ks.forEach(k => {
       map = map.get(k) ?? emptyMap;
@@ -54,34 +48,38 @@ class ArrayKeyedMap<V> {
 
   set(key: mixed, value: V): any {
     const ks = Array.isArray(key) ? key : [key];
-    // $FlowOSSFixMe
     let map = this._base;
     let next = map;
     ks.forEach(k => {
+      // $FlowFixMe[incompatible-use]
       next = map.get(k);
       if (!next) {
         next = new Map();
+        // $FlowFixMe[incompatible-use]
         map.set(k, next);
       }
       map = next;
     });
+    // $FlowFixMe[incompatible-use]
     next.set(LEAF, value);
     return this;
   }
 
   delete(key: mixed): any {
     const ks = Array.isArray(key) ? key : [key];
-    // $FlowOSSFixMe
     let map = this._base;
     let next = map;
     ks.forEach(k => {
+      // $FlowFixMe[incompatible-use]
       next = map.get(k);
       if (!next) {
         next = new Map();
+        // $FlowFixMe[incompatible-use]
         map.set(k, next);
       }
       map = next;
     });
+    // $FlowFixMe[incompatible-use]
     next.delete(LEAF);
     // TODO We could cleanup empty maps
     return this;
@@ -98,7 +96,6 @@ class ArrayKeyedMap<V> {
         }
       });
     }
-    // $FlowOSSFixMe
     recurse(this._base, []);
     return answer.values();
   }
@@ -108,4 +105,4 @@ class ArrayKeyedMap<V> {
   }
 }
 
-module.exports = ArrayKeyedMap;
+module.exports = {ArrayKeyedMap};

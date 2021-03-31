@@ -1,5 +1,76 @@
 # Change Log
 
+## LATER
+
+- Performance optimization to suppress re-rendering components:
+    - When subscribed selectors evaluate to the same value. (#749)
+    - On initial render when not using React Concurrent Mode (#820)
+- Memory management
+- Selector cache configuration
+
+## NEXT
+
+- (Add new changes here as they land)
+
+## 0.2.0 (2021-3-18)
+
+### Major improvements
+
+- More reliable async selectors
+- Improved performance using HAMT data structures (b7d1cfddec66dae).
+
+### Other improvements
+
+- Changed semantics of waitForAny() such that it will always return loadables unless everything is loading. This better aligns behaviour of waitForAny() and waitForNone()
+- Added a waitForAllSettled helper analogous to Promise.allSettled. (4c95591)
+- Friendly error message for misuse of useRecoilCallback (#870)
+- Friendly error message if you try to use an async function as a selector setter, which is not uspported. (#777)
+- Improved React Native support. (#748, #702)
+- Added useGetRecoilValueInfo_UNSTABLE() hook for dev tools. (#713, #714)
+
+### Bug fixes
+
+- Selectors now treat any non-Promise that is thrown as an error, rather than only instances of Error. (f0e66f727)
+- A child of RecoilRoot could sometimes have its state updated after being unmounted. (#917)
+- The error message for missing RecoilRoot wasn't displayed on React experimental releases. (#712)
+- IE 11 compatibility (#894, d27c800d8)
+- Errors shouldn't be frozen (#852)
+- Atom effects could fail to initialize atoms in certain cases (#775).
+- Async selectors would fail with multiple React roots (a618a3).
+
+## 0.1.3 (2021-3-2)
+
+- Fixed peer dependencies
+
+## 0.1.2 (2020-10-30)
+
+- Fix TypeScript exports
+
+## 0.1.1 (2020-10-29)
+
+- Performance Improvements
+- Experimental React Native support
+- Experimental Atom Effects
+- Experimental Snapshot construction
+
+## 0.0.13 (2020-09-16)
+
+- Fix for bug affecting SSR
+
+## 0.0.12 (2020-09-15)
+
+- Fix for bug affecting SSR on development builds
+
+## 0.0.11 (2020-09-15)
+
+- Experimental React Concurrent Mode Support
+- Performance
+- Flow Types
+- ES, CommonJS, and UMD packages
+- Synchronization Across React Roots
+- Preliminary Developer Tools API
+- Test Infrastructure Fixes
+
 ## 0.0.10 (2020-06-18)
 
 ### Bug Fix

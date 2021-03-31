@@ -4,11 +4,6 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
- * Logic for reading, writing, and subscribing to atoms within the context of
- * a particular React render tree. EVERYTHING IN THIS MODULE SHOULD BE PURE
- * FUNCTIONS BETWEEN IMMUTABLE TreeState VALUES. It is permissible to call
- * `getAtomDef` because atom definitions are constant.
- *
  * @emails oncall+recoil
  * @flow strict-local
  * @format
@@ -16,24 +11,103 @@
 'use strict';
 
 import type {Loadable} from '../adt/Recoil_Loadable';
-import type {DefaultValue} from './Recoil_Node';
-import type {NodeKey, Store, TreeState} from './Recoil_State';
+import type {DefaultValue, Trigger} from './Recoil_Node';
+import type {RecoilValue} from './Recoil_RecoilValue';
+import type {RetainedBy} from './Recoil_RetainedBy';
+import type {AtomWrites, NodeKey, Store, TreeState} from './Recoil_State';
 
-const {
-  mapByDeletingFromMap,
-  mapBySettingInMap,
-  mapByUpdatingInMap,
-  setByAddingToSet,
-} = require('../util/Recoil_CopyOnWrite');
-const Tracing = require('../util/Recoil_Tracing');
-const {getNode} = require('./Recoil_Node');
+const {setByAddingToSet} = require('../util/Recoil_CopyOnWrite');
+const filterIterable = require('../util/Recoil_filterIterable');
+const gkx = require('../util/Recoil_gkx');
+const mapIterable = require('../util/Recoil_mapIterable');
+const {getNode, getNodeMaybe, recoilValuesForKeys} = require('./Recoil_Node');
+const {RetentionZone} = require('./Recoil_RetentionZone');
 
-// flowlint-next-line unclear-type:off
-const emptyMap: $ReadOnlyMap<any, any> = Object.freeze(new Map());
 // flowlint-next-line unclear-type:off
 const emptySet: $ReadOnlySet<any> = Object.freeze(new Set());
 
 class ReadOnlyRecoilValueError extends Error {}
+
+function initializeRetentionForNode(
+  store: Store,
+  nodeKey: NodeKey,
+  retainedBy: RetainedBy,
+): () => void {
+  if (!gkx('recoil_memory_managament_2020')) {
+    return () => undefined;
+  }
+  const {nodesRetainedByZone} = store.getState().retention;
+
+  function addToZone(zone: RetentionZone) {
+    let set = nodesRetainedByZone.get(zone);
+    if (!set) {
+      nodesRetainedByZone.set(zone, (set = new Set()));
+    }
+    set.add(nodeKey);
+  }
+
+  if (retainedBy instanceof RetentionZone) {
+    addToZone(retainedBy);
+  } else if (Array.isArray(retainedBy)) {
+    for (const zone of retainedBy) {
+      addToZone(zone);
+    }
+  }
+
+  return () => {
+    if (!gkx('recoil_memory_managament_2020')) {
+      return;
+    }
+    const nodesRetainedByZone = store.getState().retention.nodesRetainedByZone;
+
+    function deleteFromZone(zone: RetentionZone) {
+      const set = nodesRetainedByZone.get(zone);
+      if (set) {
+        set.delete(nodeKey);
+      }
+      if (set && set.size === 0) {
+        nodesRetainedByZone.delete(zone);
+      }
+    }
+
+    if (retainedBy instanceof RetentionZone) {
+      deleteFromZone(retainedBy);
+    } else if (Array.isArray(retainedBy)) {
+      for (const zone of retainedBy) {
+        deleteFromZone(zone);
+      }
+    }
+  };
+}
+
+function initializeNodeIfNewToStore(
+  store: Store,
+  treeState: TreeState,
+  key: NodeKey,
+  trigger: Trigger,
+): void {
+  const storeState = store.getState();
+  if (storeState.nodeCleanupFunctions.has(key)) {
+    return;
+  }
+  const config = getNode(key);
+  const retentionCleanup = initializeRetentionForNode(
+    store,
+    key,
+    config.retainedBy,
+  );
+  const nodeCleanup = config.init(store, treeState, trigger);
+  storeState.nodeCleanupFunctions.set(key, () => {
+    nodeCleanup();
+    retentionCleanup();
+  });
+}
+
+function cleanUpNode(store: Store, key: NodeKey) {
+  const state = store.getState();
+  state.nodeCleanupFunctions.get(key)?.();
+  state.nodeCleanupFunctions.delete(key);
+}
 
 // Get the current value loadable of a node and update the state.
 // Update dependencies and subscriptions for selectors.
@@ -42,194 +116,142 @@ function getNodeLoadable<T>(
   store: Store,
   state: TreeState,
   key: NodeKey,
-): [TreeState, Loadable<T>] {
+): Loadable<T> {
+  initializeNodeIfNewToStore(store, state, key, 'get');
   return getNode(key).get(store, state);
 }
 
-// Peek at the current value loadable for a node.
-// NOTE: This will ignore updating the state for subscriptions so use sparingly!!
+// Peek at the current value loadable for a node without any evaluation or state change
 function peekNodeLoadable<T>(
   store: Store,
   state: TreeState,
   key: NodeKey,
-): Loadable<T> {
-  return getNodeLoadable(store, state, key)[1];
+): ?Loadable<T> {
+  return getNode(key).peek(store, state);
 }
 
 // Write value directly to state bypassing the Node interface as the node
 // definitions may not have been loaded yet when processing the initial snapshot.
-function setUnvalidatedAtomValue<T>(
+function setUnvalidatedAtomValue_DEPRECATED<T>(
   state: TreeState,
   key: NodeKey,
   newValue: T,
 ): TreeState {
+  const node = getNodeMaybe(key);
+  node?.invalidate?.(state);
+
   return {
     ...state,
-    atomValues: mapByDeletingFromMap(state.atomValues, key),
-    nonvalidatedAtoms: mapBySettingInMap(
-      state.nonvalidatedAtoms,
-      key,
-      newValue,
-    ),
+    atomValues: state.atomValues.clone().delete(key),
+    nonvalidatedAtoms: state.nonvalidatedAtoms.clone().set(key, newValue),
     dirtyAtoms: setByAddingToSet(state.dirtyAtoms, key),
   };
 }
 
-// Set a node value and return the set of nodes that were actually written.
-// That does not include any downstream nodes which are dependent on them.
+// Return the discovered dependencies and values to be written by setting
+// a node value. (Multiple values may be written due to selectors getting to
+// set upstreams; deps may be discovered because of reads in updater functions.)
 function setNodeValue<T>(
   store: Store,
   state: TreeState,
   key: NodeKey,
   newValue: T | DefaultValue,
-): [TreeState, $ReadOnlySet<NodeKey>] {
+): AtomWrites {
   const node = getNode(key);
   if (node.set == null) {
     throw new ReadOnlyRecoilValueError(
       `Attempt to set read-only RecoilValue: ${key}`,
     );
   }
-  const [newState, writtenNodes] = node.set(store, state, newValue);
-  return [newState, writtenNodes];
+  const set = node.set; // so flow doesn't lose the above refinement.
+  initializeNodeIfNewToStore(store, state, key, 'set');
+  return set(store, state, newValue);
+}
+
+type ComponentInfo = {
+  name: string,
+};
+
+export type RecoilValueInfo<T> = {
+  loadable: ?Loadable<T>,
+  isActive: boolean,
+  isSet: boolean,
+  isModified: boolean, // TODO report modified selectors
+  type: 'atom' | 'selector' | void, // void until initialized for now
+  deps: Iterable<RecoilValue<mixed>>,
+  subscribers: {
+    nodes: Iterable<RecoilValue<mixed>>,
+    components: Iterable<ComponentInfo>,
+  },
+};
+
+function peekNodeInfo<T>(
+  store: Store,
+  state: TreeState,
+  key: NodeKey,
+): RecoilValueInfo<T> {
+  const storeState = store.getState();
+  const graph = store.getGraph(state.version);
+  const type = storeState.knownAtoms.has(key)
+    ? 'atom'
+    : storeState.knownSelectors.has(key)
+    ? 'selector'
+    : undefined;
+  const downstreamNodes = filterIterable(
+    getDownstreamNodes(store, state, new Set([key])),
+    nodeKey => nodeKey !== key,
+  );
+  return {
+    loadable: peekNodeLoadable(store, state, key),
+    isActive:
+      storeState.knownAtoms.has(key) || storeState.knownSelectors.has(key),
+    isSet: type === 'selector' ? false : state.atomValues.has(key),
+    isModified: state.dirtyAtoms.has(key),
+    type,
+    // Report current dependencies.  If the node hasn't been evaluated, then
+    // dependencies may be missing based on the current state.
+    deps: recoilValuesForKeys(graph.nodeDeps.get(key) ?? []),
+    // Reportsall "current" subscribers.  Evaluating other nodes or
+    // previous in-progress async evaluations may introduce new subscribers.
+    subscribers: {
+      nodes: recoilValuesForKeys(downstreamNodes),
+      components: mapIterable(
+        storeState.nodeToComponentSubscriptions.get(key)?.values() ?? [],
+        ([name]) => ({name}),
+      ),
+    },
+  };
 }
 
 // Find all of the recursively dependent nodes
 function getDownstreamNodes(
+  store: Store,
   state: TreeState,
-  keys: $ReadOnlySet<NodeKey>,
+  keys: $ReadOnlySet<NodeKey> | $ReadOnlyArray<NodeKey>,
 ): $ReadOnlySet<NodeKey> {
-  const dependentNodes = new Set();
   const visitedNodes = new Set();
   const visitingNodes = Array.from(keys);
+  const graph = store.getGraph(state.version);
+
   for (let key = visitingNodes.pop(); key; key = visitingNodes.pop()) {
-    dependentNodes.add(key);
     visitedNodes.add(key);
-    const subscribedNodes = state.nodeToNodeSubscriptions.get(key) ?? emptySet;
+    const subscribedNodes = graph.nodeToNodeSubscriptions.get(key) ?? emptySet;
     for (const downstreamNode of subscribedNodes) {
       if (!visitedNodes.has(downstreamNode)) {
         visitingNodes.push(downstreamNode);
       }
     }
   }
-  return dependentNodes;
-}
-
-let subscriptionID = 0;
-function subscribeComponentToNode(
-  state: TreeState,
-  key: NodeKey,
-  callback: TreeState => void,
-): [TreeState, (TreeState) => TreeState] {
-  const subID = subscriptionID++;
-
-  const newState = {
-    ...state,
-    nodeToComponentSubscriptions: mapByUpdatingInMap(
-      state.nodeToComponentSubscriptions,
-      key,
-      subsForAtom =>
-        mapBySettingInMap(subsForAtom ?? emptyMap, subID, [
-          'TODO debug name',
-          callback,
-        ]),
-    ),
-  };
-
-  function release(state: TreeState): TreeState {
-    const newState = {
-      ...state,
-      nodeToComponentSubscriptions: mapByUpdatingInMap(
-        state.nodeToComponentSubscriptions,
-        key,
-        subsForAtom => mapByDeletingFromMap(subsForAtom ?? emptyMap, subID),
-      ),
-    };
-    return newState;
-  }
-
-  return [newState, release];
-}
-
-// Fire or enqueue callbacks to rerender components that are subscribed to
-// nodes affected by the updatedNodes
-function fireNodeSubscriptions(
-  store: Store,
-  updatedNodes: $ReadOnlySet<NodeKey>,
-  when: 'enqueue' | 'now',
-) {
-  /*
-  This is called in two conditions: When an atom is set (with 'enqueue') and
-  when an async selector resolves (with 'now'). When an atom is set, we want
-  to use the latest dependencies that may have become dependencies due to
-  earlier changes in a batch. But if an async selector happens to resolve during
-  a batch, it should use the currently rendered output, and then the end of the
-  batch will trigger any further subscriptions due to new deps in the new state.
-  */
-  const state =
-    when === 'enqueue'
-      ? store.getState().nextTree ?? store.getState().currentTree
-      : store.getState().currentTree;
-
-  const dependentNodes = getDownstreamNodes(state, updatedNodes);
-
-  for (const key of dependentNodes) {
-    (state.nodeToComponentSubscriptions.get(key) ?? []).forEach(
-      ([_debugName, cb]) => {
-        when === 'enqueue'
-          ? store.getState().queuedComponentCallbacks.push(cb)
-          : cb(state);
-      },
-    );
-  }
-
-  // Wake all suspended components so the right one(s) can try to re-render.
-  // We need to wake up components not just when some asynchronous selector
-  // resolved (when === 'now'), but also when changing synchronous values because
-  // they may cause a selector to change from asynchronous to synchronous, in
-  // which case there would be no follow-up asynchronous resolution to wake us up.
-  // TODO OPTIMIZATION Only wake up related downstream components
-  Tracing.trace(
-    'value became available, waking components',
-    Array.from(updatedNodes).join(', '),
-    () => {
-      const resolvers = store.getState().suspendedComponentResolvers;
-      resolvers.forEach(r => r());
-      resolvers.clear();
-    },
-  );
-}
-
-function detectCircularDependencies(
-  state: TreeState,
-  stack: $ReadOnlyArray<NodeKey>,
-) {
-  if (!stack.length) {
-    return;
-  }
-  const leaf = stack[stack.length - 1];
-  const downstream = state.nodeToNodeSubscriptions.get(leaf);
-  if (!downstream?.size) {
-    return;
-  }
-  const root = stack[0];
-  if (downstream.has(root)) {
-    throw new Error(
-      `Recoil selector has circular dependencies: ${[...stack, root]
-        .reverse()
-        .join(' \u2192 ')}`,
-    );
-  }
-  for (const next of downstream) {
-    detectCircularDependencies(state, [...stack, next]);
-  }
+  return visitedNodes;
 }
 
 module.exports = {
   getNodeLoadable,
   peekNodeLoadable,
   setNodeValue,
-  setUnvalidatedAtomValue,
-  subscribeComponentToNode,
-  fireNodeSubscriptions,
-  detectCircularDependencies,
+  cleanUpNode,
+  setUnvalidatedAtomValue_DEPRECATED,
+  peekNodeInfo,
+  getDownstreamNodes,
+  initializeNodeIfNewToStore,
 };

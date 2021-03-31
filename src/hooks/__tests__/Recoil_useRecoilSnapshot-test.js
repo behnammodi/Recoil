@@ -1,27 +1,49 @@
 /**
  * (c) Facebook, Inc. and its affiliates. Confidential and proprietary.
  *
- * @emails oncall+obviz
+ * @emails oncall+recoil
  * @flow strict-local
  * @format
  */
 'use strict';
 
-const React = require('React');
-const {act} = require('ReactTestUtils');
+const {getRecoilTestFn} = require('../../testing/Recoil_TestingUtils');
 
-const atom = require('../../recoil_values/Recoil_atom');
-const constSelector = require('../../recoil_values/Recoil_constSelector');
-const {
+let React,
+  useEffect,
+  act,
+  freshSnapshot,
+  atom,
+  constSelector,
+  selector,
   ReadsAtom,
   asyncSelector,
   componentThatReadsAndWritesAtom,
   flushPromisesAndTimers,
   renderElements,
-} = require('../../testing/Recoil_TestingUtils');
-const {useGotoRecoilSnapshot, useRecoilSnapshot} = require('../Recoil_Hooks');
+  useGotoRecoilSnapshot,
+  useRecoilSnapshot;
 
-test('useRecoilSnapshot - subscribe to updates', () => {
+const testRecoil = getRecoilTestFn(() => {
+  React = require('react');
+  ({useEffect} = require('react'));
+  ({act} = require('ReactTestUtils'));
+
+  ({freshSnapshot} = require('../../core/Recoil_Snapshot'));
+  atom = require('../../recoil_values/Recoil_atom');
+  constSelector = require('../../recoil_values/Recoil_constSelector');
+  selector = require('../../recoil_values/Recoil_selector');
+  ({
+    ReadsAtom,
+    asyncSelector,
+    componentThatReadsAndWritesAtom,
+    flushPromisesAndTimers,
+    renderElements,
+  } = require('../../testing/Recoil_TestingUtils'));
+  ({useGotoRecoilSnapshot, useRecoilSnapshot} = require('../Recoil_Hooks'));
+});
+
+testRecoil('useRecoilSnapshot - subscribe to updates', () => {
   const myAtom = atom({
     key: 'useRecoilSnapshot - subscribe',
     default: 'DEFAULT',
@@ -37,6 +59,7 @@ test('useRecoilSnapshot - subscribe to updates', () => {
   const snapshots = [];
   function RecoilSnapshotAndSubscribe() {
     const snapshot = useRecoilSnapshot();
+    snapshot.retain();
     snapshots.push(snapshot);
     return null;
   }
@@ -66,7 +89,7 @@ test('useRecoilSnapshot - subscribe to updates', () => {
   expect(snapshots[2].getLoadable(myAtom).contents).toEqual('DEFAULT');
 });
 
-test('useRecoilSnapshot - goto snapshots', () => {
+testRecoil('useRecoilSnapshot - goto snapshots', () => {
   const atomA = atom({
     key: 'useRecoilSnapshot - goto A',
     default: 'DEFAULT',
@@ -88,6 +111,7 @@ test('useRecoilSnapshot - goto snapshots', () => {
   function RecoilSnapshotAndSubscribe() {
     gotoSnapshot = useGotoRecoilSnapshot();
     const snapshot = useRecoilSnapshot();
+    snapshot.retain();
     snapshots.push(snapshot);
     return null;
   }
@@ -116,23 +140,29 @@ test('useRecoilSnapshot - goto snapshots', () => {
   act(() => gotoSnapshot(snapshots[0]));
   expect(c.textContent).toEqual('"DEFAULT""DEFAULT"');
 
+  // $FlowFixMe[incompatible-call]
   act(() => gotoSnapshot(snapshots[2].map(({set}) => set(atomB, 3))));
   expect(c.textContent).toEqual('13');
 });
 
-test('useRecoilSnapshot - async selectors', async () => {
+testRecoil('useRecoilSnapshot - async selectors', async () => {
   const [mySelector, resolve] = asyncSelector();
 
   const snapshots = [];
   function RecoilSnapshotAndSubscribe() {
     const snapshot = useRecoilSnapshot();
-    snapshots.push(snapshot);
+    snapshot.retain();
+    useEffect(() => {
+      snapshots.push(snapshot);
+    });
     return null;
   }
 
   const c = renderElements(
     <>
-      <ReadsAtom atom={mySelector} />
+      <React.Suspense fallback="loading">
+        <ReadsAtom atom={mySelector} />
+      </React.Suspense>
       <RecoilSnapshotAndSubscribe />
     </>,
   );
@@ -141,8 +171,73 @@ test('useRecoilSnapshot - async selectors', async () => {
 
   act(() => resolve('RESOLVE'));
   await flushPromisesAndTimers();
+  await flushPromisesAndTimers();
   expect(c.textContent).toEqual('"RESOLVE"');
 
-  expect(snapshots.length).toEqual(1);
+  expect(snapshots.length).toEqual(2);
   expect(snapshots[0].getLoadable(mySelector).contents).toEqual('RESOLVE');
+});
+
+testRecoil('Subscriptions', async () => {
+  const myAtom = atom<string>({
+    key: 'useRecoilSnapshot Subscriptions atom',
+    default: 'ATOM',
+  });
+  const selectorA = selector({
+    key: 'useRecoilSnapshot Subscriptions A',
+    get: ({get}) => get(myAtom),
+  });
+  const selectorB = selector({
+    key: 'useRecoilSnapshot Subscriptions B',
+    get: ({get}) => get(selectorA) + get(myAtom),
+  });
+  const selectorC = selector({
+    key: 'useRecoilSnapshot Subscriptions C',
+    get: async ({get}) => {
+      const ret = get(selectorA) + get(selectorB);
+      await Promise.resolve();
+      return ret;
+    },
+  });
+
+  let snapshot = freshSnapshot();
+  function RecoilSnapshot() {
+    snapshot = useRecoilSnapshot();
+    return null;
+  }
+  const c = renderElements(
+    <>
+      <ReadsAtom atom={selectorC} />
+      <RecoilSnapshot />
+    </>,
+  );
+
+  await flushPromisesAndTimers();
+
+  expect(c.textContent).toBe('"ATOMATOMATOM"');
+
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(myAtom).subscribers.nodes).length,
+  ).toBe(3);
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(myAtom).subscribers.nodes),
+  ).toEqual(expect.arrayContaining([selectorA, selectorB, selectorC]));
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(selectorA).subscribers.nodes).length,
+  ).toBe(2);
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(selectorA).subscribers.nodes),
+  ).toEqual(expect.arrayContaining([selectorB, selectorC]));
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(selectorB).subscribers.nodes).length,
+  ).toBe(1);
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(selectorB).subscribers.nodes),
+  ).toEqual(expect.arrayContaining([selectorC]));
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(selectorC).subscribers.nodes).length,
+  ).toBe(0);
+  expect(
+    Array.from(snapshot.getInfo_UNSTABLE(selectorC).subscribers.nodes),
+  ).toEqual(expect.arrayContaining([]));
 });

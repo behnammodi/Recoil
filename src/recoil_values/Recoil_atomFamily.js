@@ -11,14 +11,19 @@
 'use strict';
 
 // @fb-only: import type {ScopeRules} from 'Recoil_ScopedAtom';
-import type {CacheImplementation} from '../caches/Recoil_Cache';
+import type {CachePolicy} from '../caches/Recoil_CachePolicy';
 import type {RecoilState, RecoilValue} from '../core/Recoil_RecoilValue';
-import type {AtomOptions} from './Recoil_atom';
+import type {RetainedBy} from '../core/Recoil_RetainedBy';
+import type {AtomEffect, AtomOptions} from './Recoil_atom';
 
 // @fb-only: const {parameterizedScopedAtomLegacy} = require('Recoil_ScopedAtom');
 
-const cacheWithValueEquality = require('../caches/Recoil_cacheWithValueEquality');
-const {DEFAULT_VALUE, DefaultValue} = require('../core/Recoil_Node');
+const cacheFromPolicy = require('../caches/Recoil_cacheFromPolicy');
+const {
+  DEFAULT_VALUE,
+  DefaultValue,
+  setConfigDeletionHandler,
+} = require('../core/Recoil_Node');
 const stableStringify = require('../util/Recoil_stableStringify');
 const atom = require('./Recoil_atom');
 const selectorFamily = require('./Recoil_selectorFamily');
@@ -26,8 +31,9 @@ const selectorFamily = require('./Recoil_selectorFamily');
 type Primitive = void | null | boolean | number | string;
 export type Parameter =
   | Primitive
+  | {toJSON: () => string, ...}
   | $ReadOnlyArray<Parameter>
-  | $ReadOnly<{[string]: Parameter, ...}>;
+  | $ReadOnly<{[string]: Parameter}>;
 
 // flowlint unclear-type:off
 export type ParameterizedScopeRules<P> = $ReadOnlyArray<
@@ -43,7 +49,13 @@ export type AtomFamilyOptions<T, P: Parameter> = $ReadOnly<{
     | Promise<T>
     | T
     | (P => T | RecoilValue<T> | Promise<T>),
-  scopeRules_APPEND_ONLY_READ_THE_DOCS?: ParameterizedScopeRules<P>,
+  effects_UNSTABLE?:
+    | $ReadOnlyArray<AtomEffect<T>>
+    | (P => $ReadOnlyArray<AtomEffect<T>>),
+  retainedBy_UNSTABLE?: RetainedBy | (P => RetainedBy),
+  cachePolicyForParams_UNSTABLE?: CachePolicy,
+
+  // @fb-only: scopeRules_APPEND_ONLY_READ_THE_DOCS?: ParameterizedScopeRules<P>,
 }>;
 
 // Process scopeRules to handle any entries which are functions taking parameters
@@ -76,7 +88,12 @@ into children's state keys as well.
 function atomFamily<T, P: Parameter>(
   options: AtomFamilyOptions<T, P>,
 ): P => RecoilState<T> {
-  let atomCache: CacheImplementation<RecoilState<T>> = cacheWithValueEquality();
+  const atomCache = cacheFromPolicy<P, RecoilState<T>>(
+    options.cachePolicyForParams_UNSTABLE ?? {
+      equality: 'value',
+      eviction: 'none',
+    },
+  );
 
   // An atom to represent any legacy atoms that we can upgrade to an atomFamily
   const legacyAtomOptions = {
@@ -89,13 +106,13 @@ function atomFamily<T, P: Parameter>(
   // @fb-only: if (
   // @fb-only: options.scopeRules_APPEND_ONLY_READ_THE_DOCS
   // @fb-only: ) {
-    // @fb-only: legacyAtom = parameterizedScopedAtomLegacy<T | DefaultValue, P>({
-      // @fb-only: ...legacyAtomOptions,
-      // @fb-only: scopeRules_APPEND_ONLY_READ_THE_DOCS:
-        // @fb-only: options.scopeRules_APPEND_ONLY_READ_THE_DOCS,
-    // @fb-only: });
+  // @fb-only: legacyAtom = parameterizedScopedAtomLegacy<T | DefaultValue, P>({
+  // @fb-only: ...legacyAtomOptions,
+  // @fb-only: scopeRules_APPEND_ONLY_READ_THE_DOCS:
+  // @fb-only: options.scopeRules_APPEND_ONLY_READ_THE_DOCS,
+  // @fb-only: });
   // @fb-only: } else {
-    legacyAtom = atom<T | DefaultValue>(legacyAtomOptions);
+  legacyAtom = atom<T | DefaultValue>(legacyAtomOptions);
   // @fb-only: }
 
   // Selector to calculate the default value based on any persisted legacy atoms
@@ -121,6 +138,7 @@ function atomFamily<T, P: Parameter>(
           options.default;
     },
     dangerouslyAllowMutability: options.dangerouslyAllowMutability,
+    retainedBy_UNSTABLE: options.retainedBy_UNSTABLE,
   });
 
   // Simple atomFamily implementation to cache individual atoms based
@@ -131,18 +149,36 @@ function atomFamily<T, P: Parameter>(
       return cachedAtom;
     }
 
+    const {cachePolicyForParams_UNSTABLE, ...atomOptions} = options;
+
     const newAtom = atom<T>({
-      ...options,
+      ...atomOptions,
       key: `${options.key}__${stableStringify(params) ?? 'void'}`,
       default: atomFamilyDefault(params),
+
+      retainedBy_UNSTABLE:
+        typeof options.retainedBy_UNSTABLE === 'function'
+          ? options.retainedBy_UNSTABLE(params)
+          : options.retainedBy_UNSTABLE,
+
+      effects_UNSTABLE:
+        typeof options.effects_UNSTABLE === 'function'
+          ? options.effects_UNSTABLE(params)
+          : options.effects_UNSTABLE,
+
       // prettier-ignore
       // @fb-only: scopeRules_APPEND_ONLY_READ_THE_DOCS: mapScopeRules(
-        // @fb-only: options.scopeRules_APPEND_ONLY_READ_THE_DOCS,
-        // @fb-only: params,
-      // @fb-only: )
+      // @fb-only: options.scopeRules_APPEND_ONLY_READ_THE_DOCS,
+      // @fb-only: params,
+      // @fb-only: ),
     });
 
-    atomCache = atomCache.set(params, newAtom);
+    atomCache.set(params, newAtom);
+
+    setConfigDeletionHandler(newAtom.key, () => {
+      atomCache.delete(params);
+    });
+
     return newAtom;
   };
 }

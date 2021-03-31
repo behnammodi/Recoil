@@ -10,29 +10,46 @@
  */
 'use strict';
 
-const React = require('React');
-const {useRef, useState} = require('React');
-const {act} = require('ReactTestUtils');
+const {getRecoilTestFn} = require('../../testing/Recoil_TestingUtils');
 
-const {
+let React,
+  useRef,
+  useState,
+  act,
+  useStoreRef,
   atom,
+  atomFamily,
   selector,
   useRecoilCallback,
   useSetRecoilState,
-} = require('../../Recoil_index');
-const {
   ReadsAtom,
-  componentThatReadsAndWritesAtom,
   flushPromisesAndTimers,
   renderElements,
-} = require('../../testing/Recoil_TestingUtils');
-const invariant = require('../../util/Recoil_invariant');
+  invariant;
 
-// This shouldn't be needed, but something with React and Jest needs a kick..
-const kickAtom = atom({key: 'kicker', default: undefined});
+const testRecoil = getRecoilTestFn(() => {
+  React = require('react');
+  ({useRef, useState} = require('react'));
+  ({act} = require('ReactTestUtils'));
+
+  ({useStoreRef} = require('../../core/Recoil_RecoilRoot.react'));
+  ({
+    atom,
+    atomFamily,
+    selector,
+    useRecoilCallback,
+    useSetRecoilState,
+  } = require('../../Recoil_index'));
+  ({
+    ReadsAtom,
+    flushPromisesAndTimers,
+    renderElements,
+  } = require('../../testing/Recoil_TestingUtils'));
+  invariant = require('../../util/Recoil_invariant');
+});
 
 describe('useRecoilCallback', () => {
-  it('Reads Recoil values', async () => {
+  testRecoil('Reads Recoil values', async () => {
     const anAtom = atom({key: 'atom1', default: 'DEFAULT'});
     let pTest = Promise.reject(new Error("Callback didn't resolve"));
     let cb;
@@ -45,11 +62,11 @@ describe('useRecoilCallback', () => {
       return null;
     }
     renderElements(<Component />);
-    act(cb);
+    act(() => void cb());
     await pTest;
   });
 
-  it('Can read Recoil values without throwing', async () => {
+  testRecoil('Can read Recoil values without throwing', async () => {
     const anAtom = atom({key: 'atom2', default: 123});
     const asyncSelector = selector({
       key: 'sel',
@@ -74,11 +91,11 @@ describe('useRecoilCallback', () => {
       return null;
     }
     renderElements(<Component />);
-    act(cb);
+    act(() => void cb());
     expect(didRun).toBe(true);
   });
 
-  it('Sets Recoil values (by queueing them)', async () => {
+  testRecoil('Sets Recoil values (by queueing them)', async () => {
     const anAtom = atom({key: 'atom3', default: 'DEFAULT'});
     let cb;
     let pTest = Promise.reject(new Error("Callback didn't resolve"));
@@ -99,12 +116,12 @@ describe('useRecoilCallback', () => {
       </>,
     );
     expect(container.textContent).toBe('"DEFAULT"');
-    act(() => cb(123));
+    act(() => void cb(123));
     expect(container.textContent).toBe('123');
     await pTest;
   });
 
-  it('Reset Recoil values', async () => {
+  testRecoil('Reset Recoil values', async () => {
     const anAtom = atom({key: 'atomReset', default: 'DEFAULT'});
     let setCB, resetCB;
 
@@ -121,16 +138,15 @@ describe('useRecoilCallback', () => {
       </>,
     );
     expect(container.textContent).toBe('"DEFAULT"');
-    act(() => setCB(123));
+    act(() => void setCB(123));
     expect(container.textContent).toBe('123');
-    act(resetCB);
+    act(() => void resetCB());
     expect(container.textContent).toBe('"DEFAULT"');
   });
 
-  it('Sets Recoil values from async callback', async () => {
+  testRecoil('Sets Recoil values from async callback', async () => {
     const anAtom = atom({key: 'set async callback', default: 'DEFAULT'});
     let cb;
-    // let pTest = Promise.reject(new Error("Callback didn't resolve"));
     const pTest = [];
 
     function Component() {
@@ -146,66 +162,68 @@ describe('useRecoilCallback', () => {
       return null;
     }
 
-    // Something with React and Jest requires this extra kick...
-    const [Kick, kick] = componentThatReadsAndWritesAtom(kickAtom);
-
     const container = renderElements([
       <Component />,
       <ReadsAtom atom={anAtom} />,
-      <Kick />,
     ]);
 
     expect(container.textContent).toBe('"DEFAULT"');
-    act(() => cb(123));
-    act(kick);
+    act(() => void cb(123));
     expect(container.textContent).toBe('123');
-    act(() => cb(456));
+    act(() => void cb(456));
     expect(container.textContent).toBe('456');
     for (const aTest of pTest) {
       await aTest;
     }
   });
 
-  it('Reads from a snapshot created at callback call time', async () => {
-    const anAtom = atom({key: 'atom4', default: 123});
-    let cb;
-    let setter;
-    let seenValue = null;
+  testRecoil(
+    'Reads from a snapshot created at callback call time',
+    async () => {
+      const anAtom = atom({key: 'atom4', default: 123});
+      let cb;
+      let setter;
+      let seenValue = null;
 
-    let delay = () => new Promise(r => r()); // no delay initially
+      let delay = () => new Promise(r => r()); // no delay initially
 
-    function Component() {
-      setter = useSetRecoilState(anAtom);
-      cb = useRecoilCallback(({snapshot}) => async () => {
-        await delay();
-        seenValue = await snapshot.getPromise(anAtom);
-      });
-      return null;
-    }
+      function Component() {
+        setter = useSetRecoilState(anAtom);
+        cb = useRecoilCallback(({snapshot}) => async () => {
+          snapshot.retain();
+          await delay();
+          seenValue = await snapshot.getPromise(anAtom);
+        });
+        return null;
+      }
 
-    // It sees an update flushed after the cb is created:
-    renderElements(<Component />);
-    act(() => setter(345));
-    act(cb);
-    await flushPromisesAndTimers();
-    expect(seenValue).toBe(345);
+      // It sees an update flushed after the cb is created:
+      renderElements(<Component />);
+      act(() => setter(345));
+      act(() => void cb());
+      await flushPromisesAndTimers();
+      await flushPromisesAndTimers();
 
-    // But does not see an update flushed while the cb is in progress:
-    seenValue = null;
-    let resumeCallback = () => invariant(false, 'must be initialized');
-    delay = () => {
-      return new Promise(resolve => {
-        resumeCallback = resolve;
-      });
-    };
-    act(cb);
-    act(() => setter(678));
-    resumeCallback();
-    await flushPromisesAndTimers();
-    expect(seenValue).toBe(345);
-  });
+      expect(seenValue).toBe(345);
 
-  it('Setter updater sees current state', () => {
+      // But does not see an update flushed while the cb is in progress:
+      seenValue = null;
+      let resumeCallback = () => invariant(false, 'must be initialized');
+      delay = () => {
+        return new Promise(resolve => {
+          resumeCallback = resolve;
+        });
+      };
+      act(() => void cb());
+      act(() => setter(678));
+      resumeCallback();
+      await flushPromisesAndTimers();
+      await flushPromisesAndTimers();
+      expect(seenValue).toBe(345);
+    },
+  );
+
+  testRecoil('Setter updater sees current state', () => {
     const myAtom = atom({key: 'useRecoilCallback updater', default: 'DEFAULT'});
 
     let setAtom;
@@ -229,12 +247,10 @@ describe('useRecoilCallback', () => {
       return null;
     }
 
-    const [Kick, kick] = componentThatReadsAndWritesAtom(kickAtom);
     const c = renderElements(
       <>
         <ReadsAtom atom={myAtom} />
         <Component />
-        <Kick />
       </>,
     );
 
@@ -246,11 +262,10 @@ describe('useRecoilCallback', () => {
       cb('SET');
       cb('UPDATE AGAIN');
     });
-    act(kick);
     expect(c.textContent).toEqual('"UPDATE AGAIN"');
   });
 
-  it('goes to snapshot', () => {
+  testRecoil('goes to snapshot', async () => {
     const myAtom = atom({
       key: 'Goto Snapshot From Callback',
       default: 'DEFAULT',
@@ -270,28 +285,62 @@ describe('useRecoilCallback', () => {
       return null;
     }
 
-    // Something with React and Jest requires this extra kick...
-    const [Kick, kick] = componentThatReadsAndWritesAtom(kickAtom);
-
     const c = renderElements(
       <>
         <ReadsAtom atom={myAtom} />
         <RecoilCallback />
-        <Kick />
       </>,
     );
 
     expect(c.textContent).toEqual('"DEFAULT"');
 
-    act(cb);
-    act(kick);
+    act(() => void cb());
+    await flushPromisesAndTimers();
     expect(c.textContent).toEqual('"SET IN SNAPSHOT"');
+  });
+
+  testRecoil('Updates are batched', () => {
+    const family = atomFamily({
+      key: 'useRecoilCallback/batching/family',
+      default: 0,
+    });
+
+    let cb;
+    function RecoilCallback() {
+      cb = useRecoilCallback(({set}) => () => {
+        for (let i = 0; i < 100; i++) {
+          set(family(i), 1);
+        }
+      });
+    }
+
+    let store: any; // flowlint-line unclear-type:off
+    function GetStore() {
+      store = useStoreRef().current;
+    }
+
+    renderElements(
+      <>
+        <RecoilCallback />
+        <GetStore />
+      </>,
+    );
+
+    invariant(store, 'store should be initialized');
+    const originalReplaceState = store.replaceState;
+    store.replaceState = jest.fn(originalReplaceState);
+
+    expect(store.replaceState).toHaveBeenCalledTimes(0);
+    act(() => cb());
+    expect(store.replaceState).toHaveBeenCalledTimes(1);
+
+    store.replaceState = originalReplaceState;
   });
 });
 
 // Test that we always get a consistent instance of the callback function
 // from useRecoilCallback() when it is memoizaed
-test('Consistent callback function', () => {
+testRecoil('Consistent callback function', () => {
   let setIteration;
   const Component = () => {
     const [iteration, _setIteration] = useState(0);

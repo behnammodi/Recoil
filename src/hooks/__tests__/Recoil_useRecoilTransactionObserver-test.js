@@ -10,20 +10,36 @@
  */
 'use strict';
 
-const React = require('React');
-const {act} = require('ReactTestUtils');
+const {getRecoilTestFn} = require('../../testing/Recoil_TestingUtils');
 
-const {freshSnapshot} = require('../../core/Recoil_Snapshot');
-const atom = require('../../recoil_values/Recoil_atom');
-const atomFamily = require('../../recoil_values/Recoil_atomFamily');
-const selector = require('../../recoil_values/Recoil_selector');
-const {
+let React,
+  act,
+  freshSnapshot,
+  atom,
+  atomFamily,
+  selector,
   ReadsAtom,
   asyncSelector,
   componentThatReadsAndWritesAtom,
   renderElements,
-} = require('../../testing/Recoil_TestingUtils');
-const {useRecoilTransactionObserver} = require('../Recoil_Hooks');
+  useRecoilTransactionObserver;
+
+const testRecoil = getRecoilTestFn(() => {
+  React = require('react');
+  ({act} = require('ReactTestUtils'));
+
+  ({freshSnapshot} = require('../../core/Recoil_Snapshot'));
+  atom = require('../../recoil_values/Recoil_atom');
+  atomFamily = require('../../recoil_values/Recoil_atomFamily');
+  selector = require('../../recoil_values/Recoil_selector');
+  ({
+    ReadsAtom,
+    asyncSelector,
+    componentThatReadsAndWritesAtom,
+    renderElements,
+  } = require('../../testing/Recoil_TestingUtils'));
+  ({useRecoilTransactionObserver} = require('../Recoil_Hooks'));
+});
 
 function TransactionObserver({callback}) {
   useRecoilTransactionObserver(callback);
@@ -31,10 +47,11 @@ function TransactionObserver({callback}) {
 }
 
 // Run test first since it deals with all registered atoms
-test('getNodes', () => {
+testRecoil('getNodes', () => {
   let snapshot = freshSnapshot();
   function UseRecoilTransactionObserver() {
     useRecoilTransactionObserver(p => {
+      p.snapshot.retain();
       snapshot = p.snapshot;
     });
     return null;
@@ -63,53 +80,57 @@ test('getNodes', () => {
   expect(c.textContent).toEqual('"A""B""A-SELECTOR"');
 
   expect(
-    Array.from(snapshot.getNodes_UNSTABLE()).length,
-  ).toBeGreaterThanOrEqual(2);
+    Array.from(snapshot.getNodes_UNSTABLE({isInitialized: true})).length,
+  ).toEqual(0);
   act(() => setAtomA('A'));
   // Greater than 3 because we expect at least nodes for atom's A and B from
   // the family and selectorA.  In reality we currenlty get 8 due to internal
   // helper selectors and default fallback atoms.
-  expect(Array.from(snapshot.getNodes_UNSTABLE()).length).toBeGreaterThan(3);
-  const nodes = Array.from(snapshot.getNodes_UNSTABLE());
+  expect(
+    Array.from(snapshot.getNodes_UNSTABLE({isInitialized: true})).length,
+  ).toBeGreaterThan(3);
+  const nodes = Array.from(snapshot.getNodes_UNSTABLE({isInitialized: true}));
   expect(nodes).toEqual(
     expect.arrayContaining([atoms('A'), atoms('B'), selectorA]),
   );
 
   // Test atom A is set
-  const aDirty = Array.from(snapshot.getNodes_UNSTABLE({dirty: true}));
+  const aDirty = Array.from(snapshot.getNodes_UNSTABLE({isModified: true}));
   expect(aDirty.length).toEqual(1);
   expect(snapshot.getLoadable(aDirty[0]).contents).toEqual('A');
 
   // Test atom B is set
   act(() => setAtomB('B'));
-  const bDirty = Array.from(snapshot.getNodes_UNSTABLE({dirty: true}));
+  const bDirty = Array.from(snapshot.getNodes_UNSTABLE({isModified: true}));
   expect(bDirty.length).toEqual(1);
   expect(snapshot.getLoadable(bDirty[0]).contents).toEqual('B');
 
-  // // Test atoms
-  // const atomNodes = Array.from(snapshot.getNodes_UNSTABLE({types: ['atom']}));
-  // expect(atomNodes.map(atom => snapshot.getLoadable(atom).contents)).toEqual(
-  //   expect.arrayContaining(['A', 'B']),
-  // );
+  // Test atoms
+  const atomNodes = Array.from(
+    snapshot.getNodes_UNSTABLE({isInitialized: true}),
+  );
+  expect(atomNodes.map(atom => snapshot.getLoadable(atom).contents)).toEqual(
+    expect.arrayContaining(['A', 'B']),
+  );
 
-  // // Test selector
-  // const selectorNodes = Array.from(
-  //   snapshot.getNodes_UNSTABLE({types: ['selector']}),
-  // );
-  // expect(
-  //   selectorNodes.map(atom => snapshot.getLoadable(atom).contents),
-  // ).toEqual(expect.arrayContaining(['A-SELECTOR']));
+  // Test selector
+  const selectorNodes = Array.from(
+    snapshot.getNodes_UNSTABLE({isInitialized: true}),
+  );
+  expect(
+    selectorNodes.map(atom => snapshot.getLoadable(atom).contents),
+  ).toEqual(expect.arrayContaining(['A-SELECTOR']));
 
   // Test Reset
   act(resetAtomA);
-  const resetDirty = Array.from(snapshot.getNodes_UNSTABLE({dirty: true}));
+  const resetDirty = Array.from(snapshot.getNodes_UNSTABLE({isModified: true}));
   expect(resetDirty.length).toEqual(1);
   expect(resetDirty[0]).toBe(aDirty[0]);
 
   // TODO Test dirty selectors
 });
 
-test('Can observe atom value', async () => {
+testRecoil('Can observe atom value', async () => {
   const atomA = atom({
     key: 'Observe Atom A',
     default: 'DEFAULT A',
@@ -128,6 +149,8 @@ test('Can observe atom value', async () => {
     <>
       <TransactionObserver
         callback={({snapshot, previousSnapshot}) => {
+          snapshot.retain();
+          previousSnapshot.retain();
           transactions.push({snapshot, previousSnapshot});
         }}
       />
@@ -185,7 +208,7 @@ test('Can observe atom value', async () => {
   ).resolves.toEqual('SET B');
 });
 
-test('Can observe selector value', async () => {
+testRecoil('Can observe selector value', async () => {
   const atomA = atom({
     key: 'Observe Atom for Selector',
     default: 'DEFAULT',
@@ -203,6 +226,8 @@ test('Can observe selector value', async () => {
     <>
       <TransactionObserver
         callback={({snapshot, previousSnapshot}) => {
+          snapshot.retain();
+          previousSnapshot.retain();
           transactions.push({snapshot, previousSnapshot});
         }}
       />
@@ -227,7 +252,7 @@ test('Can observe selector value', async () => {
   ).resolves.toEqual('SELECTOR DEFAULT');
 });
 
-test('Can observe async selector value', async () => {
+testRecoil('Can observe async selector value', async () => {
   const atomA = atom({
     key: 'Observe Atom for Async Selector',
     default: 'DEFAULT',
@@ -241,6 +266,8 @@ test('Can observe async selector value', async () => {
     <>
       <TransactionObserver
         callback={({snapshot, previousSnapshot}) => {
+          snapshot.retain();
+          previousSnapshot.retain();
           transactions.push({snapshot, previousSnapshot});
         }}
       />
